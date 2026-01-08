@@ -1,0 +1,15 @@
+# VRIN Benchmark Dependencies
+
+# VRIN SDK
+vrin>=0.8.0
+
+# Data handling
+datasets>=2.14.0
+huggingface-hub>=0.16.0
+
+# Utilities
+tqdm>=4.65.0
+python-dotenv>=1.0.0
+
+# For semantic evaluation (optional)
+openai>=1.0.0

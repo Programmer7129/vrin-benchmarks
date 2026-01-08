@@ -171,6 +171,5 @@ If you use these benchmarks in your research:
 
 ## Contact
 
-- Questions: research@vrin.ai
-- Issues: Open a GitHub issue
-- Website: [vrin.ai](https://vrin.ai)
+- Questions: [Open a GitHub issue](https://github.com/Programmer7129/vrin-benchmarks/issues)
+- Website: [vrin.cloud](https://vrin.cloud)

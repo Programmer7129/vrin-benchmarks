@@ -1,0 +1,41 @@
+{
+  "name": "RAGBench FinQA",
+  "source": "rungalileo/ragbench",
+  "subset": "finqa",
+  "paper": "https://arxiv.org/abs/2407.11005",
+  "splits": {
+    "train": 12502,
+    "validation": 1766,
+    "test": 2294,
+    "total": 16562
+  },
+  "description": "Financial question answering with numerical reasoning over hybrid tabular and text data",
+  "features": [
+    "id",
+    "question",
+    "documents",
+    "response",
+    "generation_model_name",
+    "annotating_model_name",
+    "dataset_name",
+    "documents_sentences",
+    "response_sentences",
+    "sentence_support_information",
+    "unsupported_response_sentence_keys",
+    "adherence_score",
+    "overall_supported_explanation",
+    "relevance_explanation",
+    "all_relevant_sentence_keys",
+    "all_utilized_sentence_keys",
+    "trulens_groundedness",
+    "trulens_context_relevance",
+    "ragas_faithfulness",
+    "ragas_context_relevance",
+    "gpt3_adherence",
+    "gpt3_context_relevance",
+    "gpt35_utilization",
+    "relevance_score",
+    "utilization_score",
+    "completeness_score"
+  ]
+}

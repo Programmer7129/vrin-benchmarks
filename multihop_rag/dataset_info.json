@@ -1,0 +1,17 @@
+{
+  "name": "MultiHop-RAG",
+  "source": "yixuantt/MultiHopRAG",
+  "paper": "https://arxiv.org/abs/2401.15391",
+  "github": "https://github.com/yixuantt/MultiHop-RAG",
+  "splits": {
+    "train": 2556
+  },
+  "total": 2556,
+  "description": "Multi-hop QA requiring retrieval and reasoning across 2-4 documents",
+  "features": [
+    "evidence_list",
+    "answer",
+    "query",
+    "question_type"
+  ]
+}

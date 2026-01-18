@@ -1,1 +1,8 @@
 .claude
+
+# Large data files (use .zip versions instead)
+multihop_rag/corpus_train.json
+multihop_rag/queries_train.json
+ragbench_finqa_data/train.json
+ragbench_finqa_data/test.json
+ragbench_finqa_data/validation.json

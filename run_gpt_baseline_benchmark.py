@@ -1,39 +1,38 @@
 #!/usr/bin/env python3
 """
-MultiHop-RAG Benchmark - Large Sample with Continuous Logging
+GPT Baseline Benchmark - For comparison with VRIN on MultiHop-RAG
 
-Dataset: yixuantt/MultiHopRAG (2,556 multi-hop reasoning queries)
-Sample Size: 384 questions
-Statistical: Stratified sampling by question_type, calculated margin of error
+Dataset: yixuantt/MultiHopRAG
+Sample Size: 100 questions
+Purpose: Compare raw GPT performance (with evidence in context) vs VRIN Hybrid RAG
 
-Evaluation uses LLM-based answer normalization to handle cases where VRIN
-returns a detailed response (e.g., "Based on the evidence, this indicates...")
-but the benchmark expects a simple keyword (e.g., "Yes").
+This gives GPT the same evidence documents that VRIN ingests, simulating
+what a user would do without VRIN: copy/paste documents into ChatGPT.
 """
 
 import os
 import sys
 import json
 import time
+import requests
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from vrin import VRINClient
 from benchmark_utils import (
     calculate_margin_of_error,
     stratified_sample,
-    get_api_key,
     evaluate_multihop_answer,
     format_duration
 )
 
 # Configuration
-SAMPLE_SIZE = 384
-LOG_FILE = Path(__file__).parent / "multihop_rag" / "logs" / f"multihop_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-RESULTS_FILE = Path(__file__).parent / "multihop_rag" / "results" / f"multihop_{SAMPLE_SIZE}_sample_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+SAMPLE_SIZE = 100
+MODEL = "gpt-4o"  # Change to the model you want to benchmark
+LOG_FILE = Path(__file__).parent / "gpt_baseline" / "logs" / f"gpt_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+RESULTS_FILE = Path(__file__).parent / "gpt_baseline" / "results" / f"gpt_{SAMPLE_SIZE}_sample_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
 
 
 def log(message):
@@ -44,6 +43,81 @@ def log(message):
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(LOG_FILE, 'a') as f:
         f.write(log_msg + '\n')
+
+
+def get_openai_key():
+    """Get OpenAI API key from environment or .env file"""
+    api_key = os.getenv('OPENAI_API_KEY')
+    if not api_key:
+        env_path = Path(__file__).parent / '.env'
+        if env_path.exists():
+            with open(env_path, 'r') as f:
+                for line in f:
+                    if line.startswith('OPENAI_API_KEY='):
+                        api_key = line.split('=', 1)[1].strip()
+                        break
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY not found in environment or .env file")
+    return api_key
+
+
+def query_gpt(question: str, evidence_docs: list, api_key: str) -> str:
+    """
+    Query GPT directly with evidence documents in context.
+
+    This simulates what a user would do without VRIN - copy/paste documents
+    into ChatGPT and ask a question.
+    """
+    context = "## Evidence Documents\n\n"
+    for i, evidence in enumerate(evidence_docs):
+        context += f"### Document {i+1}: {evidence.get('title', 'Untitled')}\n"
+        context += f"Source: {evidence.get('source', 'Unknown')}\n"
+        context += f"Content: {evidence['fact']}\n\n"
+
+    prompt = f"""{context}
+
+## Question
+{question}
+
+## Instructions
+Based ONLY on the evidence documents provided above, answer the question.
+- For Yes/No questions: Start with "Yes" or "No" then explain
+- For comparison questions: State if they are "Similar" or "Different"
+- For entity questions: State the entity name clearly
+- If information is insufficient: Say "Insufficient information"
+
+Your answer:"""
+
+    try:
+        response = requests.post(
+            'https://api.openai.com/v1/chat/completions',
+            headers={
+                'Authorization': f'Bearer {api_key}',
+                'Content-Type': 'application/json'
+            },
+            json={
+                'model': MODEL,
+                'messages': [
+                    {
+                        'role': 'system',
+                        'content': 'You are a helpful assistant that answers questions based on provided evidence documents. Be precise and cite evidence when possible.'
+                    },
+                    {'role': 'user', 'content': prompt}
+                ],
+                'max_tokens': 1000,
+                'temperature': 0.1
+            },
+            timeout=120
+        )
+
+        if response.status_code == 200:
+            result = response.json()
+            return result['choices'][0]['message']['content']
+        else:
+            return f"Error: {response.status_code} - {response.text[:200]}"
+
+    except Exception as e:
+        return f"Error: {str(e)}"
 
 
 def run_benchmark():
@@ -61,7 +135,7 @@ def run_benchmark():
     margin_of_error = calculate_margin_of_error(SAMPLE_SIZE, population_size)
 
     log("=" * 80)
-    log("MultiHop-RAG Benchmark")
+    log(f"GPT Baseline Benchmark (Model: {MODEL})")
     log(f"Sample Size: {SAMPLE_SIZE} questions")
     log(f"Population Size: {population_size} questions")
     log(f"Margin of Error: ±{margin_of_error}% at 95% confidence")
@@ -69,33 +143,22 @@ def run_benchmark():
     log(f"Log File: {LOG_FILE}")
     log("=" * 80)
 
-    # Stratified sampling by question_type
-    if len(full_dataset) > SAMPLE_SIZE:
-        sample, question_type_distribution = stratified_sample(
-            full_dataset,
-            SAMPLE_SIZE,
-            stratify_key='question_type',
-            seed=42
-        )
-        log(f"Stratified sample of {len(sample)} questions by question_type")
-        log(f"Distribution: {json.dumps(question_type_distribution)}")
-    else:
-        sample = full_dataset
-        question_type_distribution = defaultdict(int)
-        for item in sample:
-            question_type_distribution[item.get('question_type', 'unknown')] += 1
-        question_type_distribution = dict(question_type_distribution)
-        log(f"Using all {len(sample)} questions")
+    # Stratified sampling - use SAME seed as VRIN for fair comparison
+    sample, question_type_distribution = stratified_sample(
+        full_dataset,
+        SAMPLE_SIZE,
+        stratify_key='question_type',
+        seed=42  # Same seed as VRIN benchmark
+    )
+    log(f"Stratified sample of {len(sample)} questions by question_type")
+    log(f"Distribution: {json.dumps(question_type_distribution)}")
 
-    # Initialize client (API key required from environment)
-    api_key = get_api_key()
-    client = VRINClient(api_key=api_key)
-    log(f"VRIN Client initialized")
+    # Get API key
+    api_key = get_openai_key()
+    log(f"OpenAI API key loaded")
 
     # Tracking
     results = []
-    successful_insertions = 0
-    successful_queries = 0
     correct_answers = 0
     match_types = defaultdict(int)
     accuracy_by_type = defaultdict(lambda: {'correct': 0, 'total': 0})
@@ -111,45 +174,17 @@ def run_benchmark():
         log(f"Expected: {item['answer']}")
         log(f"Type: {question_type}")
 
-        # Combine evidence
-        combined_content = f"MultiHop Evidence {idx}\n\n"
-        for i, evidence in enumerate(item['evidence_list']):
-            combined_content += f"Document {i+1} - {evidence.get('title', 'Untitled')}\n"
-            combined_content += f"Source: {evidence.get('source', 'Unknown')}\n"
-            combined_content += f"Fact: {evidence['fact']}\n\n"
-
-        # Insert
+        # Query GPT directly with evidence
         try:
-            insert_result = client.insert(combined_content, wait=True)
-            facts_extracted = insert_result.get('facts_extracted', 0)
-            facts_stored = insert_result.get('facts_stored', 0)
-            log(f"INSERT: {facts_extracted} facts extracted, {facts_stored} stored")
-            successful_insertions += 1
-        except Exception as e:
-            log(f"INSERT FAILED: {str(e)}")
-            results.append({
-                'query': item['query'],
-                'expected': item['answer'],
-                'vrin_response': '',
-                'question_type': question_type,
-                'insertion_success': False,
-                'query_success': False,
-                'correct': False,
-                'match_type': 'insertion_failed',
-                'elapsed': time.time() - question_start
-            })
-            accuracy_by_type[question_type]['total'] += 1
-            continue
+            gpt_answer = query_gpt(item['query'], item['evidence_list'], api_key)
+            log(f"GPT: Got response ({len(gpt_answer)} chars)")
 
-        # Query using research mode (full knowledge graph + vector search)
-        try:
-            query_result = client.query(item['query'], response_mode='research')
-            vrin_answer = query_result.get('summary', query_result.get('response', ''))
-            log(f"QUERY: Got response ({len(vrin_answer)} chars)")
-            successful_queries += 1
-
-            # Evaluate with LLM-based answer normalization
-            correct, match_type = evaluate_multihop_answer(item['answer'], vrin_answer, question=item['query'])
+            # Evaluate with same LLM normalizer as VRIN
+            correct, match_type = evaluate_multihop_answer(
+                item['answer'],
+                gpt_answer,
+                question=item['query']
+            )
             match_types[match_type] += 1
 
             if correct:
@@ -158,7 +193,7 @@ def run_benchmark():
                 accuracy_by_type[question_type]['correct'] += 1
             else:
                 log(f"INCORRECT")
-                log(f"   VRIN (first 150 chars): {vrin_answer[:150]}")
+                log(f"   GPT (first 150 chars): {gpt_answer[:150]}")
 
             accuracy_by_type[question_type]['total'] += 1
             question_elapsed = time.time() - question_start
@@ -167,10 +202,8 @@ def run_benchmark():
             results.append({
                 'query': item['query'],
                 'expected': item['answer'],
-                'vrin_response': vrin_answer,
+                'gpt_response': gpt_answer,
                 'question_type': question_type,
-                'insertion_success': True,
-                'query_success': True,
                 'correct': correct,
                 'match_type': match_type,
                 'elapsed': question_elapsed
@@ -182,10 +215,8 @@ def run_benchmark():
             results.append({
                 'query': item['query'],
                 'expected': item['answer'],
-                'vrin_response': '',
+                'gpt_response': '',
                 'question_type': question_type,
-                'insertion_success': True,
-                'query_success': False,
                 'correct': False,
                 'match_type': 'query_failed',
                 'elapsed': time.time() - question_start
@@ -220,6 +251,7 @@ def run_benchmark():
     log(f"\n{'='*80}")
     log("FINAL RESULTS")
     log(f"{'='*80}")
+    log(f"Model: {MODEL}")
     log(f"Accuracy: {accuracy:.1f}% ({correct_answers}/{len(sample)})")
     log(f"Margin of Error: ±{margin_of_error}% at 95% confidence")
     log(f"Confidence Interval: [{accuracy - margin_of_error:.1f}%, {accuracy + margin_of_error:.1f}%]")
@@ -232,7 +264,8 @@ def run_benchmark():
     # Save results
     RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     final_results = {
-        'benchmark': 'MultiHop-RAG',
+        'benchmark': f'GPT Baseline ({MODEL})',
+        'model': MODEL,
         'dataset_source': 'yixuantt/MultiHopRAG',
         'timestamp': datetime.now().isoformat(),
 
@@ -253,8 +286,6 @@ def run_benchmark():
         # Results
         'accuracy': round(accuracy, 2),
         'correct_answers': correct_answers,
-        'successful_insertions': successful_insertions,
-        'successful_queries': successful_queries,
 
         # Breakdown
         'match_types': dict(match_types),

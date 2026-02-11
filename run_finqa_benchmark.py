@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 RAGBench FinQA Benchmark - Large Sample with Continuous Logging
-Sample Size: 200 questions (±7% error margin)
+
+Dataset: rungalileo/ragbench (FinQA split)
+Sample Size: 384 questions
+Statistical: Calculated margin of error with finite population correction
 """
 
 import os
@@ -11,15 +14,23 @@ import random
 import time
 from pathlib import Path
 from datetime import datetime
+from collections import defaultdict
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent))
 
 from vrin import VRINClient
+from benchmark_utils import (
+    calculate_margin_of_error,
+    get_api_key,
+    evaluate_finqa_answer,
+    format_duration
+)
 
 # Configuration
-SAMPLE_SIZE = 384  # ±5% error margin at 95% confidence
+SAMPLE_SIZE = 384
 LOG_FILE = Path(__file__).parent / "ragbench_finqa" / "logs" / f"finqa_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-RESULTS_FILE = Path(__file__).parent / "ragbench_finqa" / "results" / f"finqa_384_sample_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+RESULTS_FILE = Path(__file__).parent / "ragbench_finqa" / "results" / f"finqa_{SAMPLE_SIZE}_sample_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+
 
 def log(message):
     """Write to log file and print"""
@@ -30,14 +41,8 @@ def log(message):
     with open(LOG_FILE, 'a') as f:
         f.write(log_msg + '\n')
 
-def run_benchmark():
-    log("=" * 80)
-    log("RAGBench FinQA Benchmark - Large Sample Run")
-    log(f"Sample Size: {SAMPLE_SIZE} questions")
-    log(f"Error Margin: ±5% at 95% confidence")
-    log(f"Log File: {LOG_FILE}")
-    log("=" * 80)
 
+def run_benchmark():
     # Load full dataset
     data_file = Path(__file__).parent / "ragbench_finqa" / "data" / "test.json"
     log(f"Loading dataset from: {data_file}")
@@ -45,10 +50,23 @@ def run_benchmark():
     with open(data_file, 'r') as f:
         full_dataset = json.load(f)
 
-    log(f"Full dataset size: {len(full_dataset)} questions")
+    population_size = len(full_dataset)
+    log(f"Full dataset size: {population_size} questions")
 
-    # Random sampling
-    random.seed(42)  # Reproducible sampling
+    # Calculate margin of error
+    margin_of_error = calculate_margin_of_error(SAMPLE_SIZE, population_size)
+
+    log("=" * 80)
+    log("RAGBench FinQA Benchmark")
+    log(f"Sample Size: {SAMPLE_SIZE} questions")
+    log(f"Population Size: {population_size} questions")
+    log(f"Margin of Error: ±{margin_of_error}% at 95% confidence")
+    log(f"Sampling Method: Random (seed=42)")
+    log(f"Log File: {LOG_FILE}")
+    log("=" * 80)
+
+    # Random sampling (FinQA doesn't have question_type for stratification)
+    random.seed(42)
     if len(full_dataset) > SAMPLE_SIZE:
         sample = random.sample(full_dataset, SAMPLE_SIZE)
         log(f"Randomly sampled {SAMPLE_SIZE} questions")
@@ -56,23 +74,24 @@ def run_benchmark():
         sample = full_dataset
         log(f"Using all {len(sample)} questions (dataset smaller than sample size)")
 
-    # Initialize client
-    api_key = os.getenv('TEST_ACC_API_KEY', 'vrin_4926d56cff3a2adc')
+    # Initialize client (API key required from environment)
+    api_key = get_api_key()
     client = VRINClient(api_key=api_key)
-    log(f"VRIN Client initialized with API key: {api_key[:15]}...")
+    log(f"VRIN Client initialized")
 
     # Tracking
     results = []
     successful_insertions = 0
     successful_queries = 0
     correct_answers = 0
+    match_types = defaultdict(int)
     start_time = time.time()
 
     for idx, item in enumerate(sample, 1):
         question_start = time.time()
 
         log(f"\n{'='*60}")
-        log(f"Question {idx}/{SAMPLE_SIZE} (ID: {item['id']})")
+        log(f"Question {idx}/{len(sample)} (ID: {item['id']})")
         log(f"Query: {item['question'][:80]}...")
 
         # Combine documents
@@ -81,7 +100,7 @@ def run_benchmark():
             if isinstance(doc, str):
                 combined_content += f"Document {i+1}:\n{doc}\n\n"
             elif isinstance(doc, list):
-                # Table format
+                # Table format - preserve structure
                 combined_content += f"Table {i+1}:\n"
                 for row in doc:
                     combined_content += " | ".join(str(cell) for cell in row) + "\n"
@@ -92,10 +111,10 @@ def run_benchmark():
             insert_result = client.insert(combined_content, wait=True)
             facts_extracted = insert_result.get('facts_extracted', 0)
             facts_stored = insert_result.get('facts_stored', 0)
-            log(f"✅ INSERT: {facts_extracted} facts extracted, {facts_stored} stored")
+            log(f"INSERT: {facts_extracted} facts extracted, {facts_stored} stored")
             successful_insertions += 1
         except Exception as e:
-            log(f"❌ INSERT FAILED: {str(e)}")
+            log(f"INSERT FAILED: {str(e)}")
             results.append({
                 'id': item['id'],
                 'question': item['question'],
@@ -104,43 +123,32 @@ def run_benchmark():
                 'insertion_success': False,
                 'query_success': False,
                 'correct': False,
+                'match_type': 'insertion_failed',
                 'elapsed': time.time() - question_start
             })
             continue
 
-        # Query
+        # Query using research mode (full knowledge graph + vector search)
         try:
-            query_result = client.query(item['question'])
+            query_result = client.query(item['question'], response_mode='research')
             vrin_answer = query_result.get('summary', query_result.get('response', ''))
-            log(f"✅ QUERY: Got response ({len(vrin_answer)} chars)")
+            log(f"QUERY: Got response ({len(vrin_answer)} chars)")
             successful_queries += 1
 
-            # Check correctness (fuzzy match - look for numerical values)
-            import re
-            expected_nums = re.findall(r'[\d,]+\.?\d*', item['response'])
-            vrin_nums = re.findall(r'[\d,]+\.?\d*', vrin_answer)
-
-            correct = False
-            for exp_num in expected_nums[:3]:  # Check first 3 numbers from expected
-                exp_clean = exp_num.replace(',', '')
-                for vrin_num in vrin_nums:
-                    vrin_clean = vrin_num.replace(',', '')
-                    if exp_clean in vrin_clean or vrin_clean in exp_clean:
-                        correct = True
-                        break
-                if correct:
-                    break
+            # Evaluate with improved numerical matching
+            correct, match_type = evaluate_finqa_answer(item['response'], vrin_answer)
+            match_types[match_type] += 1
 
             if correct:
-                log(f"🎯 CORRECT: Found expected numerical value")
+                log(f"CORRECT ({match_type})")
                 correct_answers += 1
             else:
-                log(f"❌ INCORRECT: Expected values not found")
+                log(f"INCORRECT")
                 log(f"   Expected (first 100 chars): {item['response'][:100]}")
                 log(f"   VRIN (first 100 chars): {vrin_answer[:100]}")
 
             question_elapsed = time.time() - question_start
-            log(f"⏱️  Question time: {question_elapsed:.1f}s")
+            log(f"Time: {format_duration(question_elapsed)}")
 
             results.append({
                 'id': item['id'],
@@ -150,11 +158,12 @@ def run_benchmark():
                 'insertion_success': True,
                 'query_success': True,
                 'correct': correct,
+                'match_type': match_type,
                 'elapsed': question_elapsed
             })
 
         except Exception as e:
-            log(f"❌ QUERY FAILED: {str(e)}")
+            log(f"QUERY FAILED: {str(e)}")
             results.append({
                 'id': item['id'],
                 'question': item['question'],
@@ -163,6 +172,7 @@ def run_benchmark():
                 'insertion_success': True,
                 'query_success': False,
                 'correct': False,
+                'match_type': 'query_failed',
                 'elapsed': time.time() - question_start
             })
 
@@ -170,57 +180,83 @@ def run_benchmark():
         if idx % 10 == 0:
             elapsed = time.time() - start_time
             avg_time = elapsed / idx
-            remaining = (SAMPLE_SIZE - idx) * avg_time
-            log(f"\n📊 PROGRESS UPDATE:")
-            log(f"   Completed: {idx}/{SAMPLE_SIZE} ({idx/SAMPLE_SIZE*100:.1f}%)")
-            log(f"   Correct so far: {correct_answers}/{idx} ({correct_answers/idx*100:.1f}%)")
-            log(f"   Avg time/question: {avg_time:.1f}s")
-            log(f"   Estimated remaining: {remaining/60:.1f} min")
+            remaining = (len(sample) - idx) * avg_time
+            current_accuracy = correct_answers / idx * 100
+            log(f"\nPROGRESS:")
+            log(f"   Completed: {idx}/{len(sample)} ({idx/len(sample)*100:.1f}%)")
+            log(f"   Correct: {correct_answers}/{idx} ({current_accuracy:.1f}%)")
+            log(f"   Avg time: {format_duration(avg_time)}/question")
+            log(f"   ETA: {format_duration(remaining)}")
 
     # Final summary
     total_elapsed = time.time() - start_time
-    accuracy = (correct_answers / SAMPLE_SIZE * 100) if SAMPLE_SIZE > 0 else 0
+    accuracy = (correct_answers / len(sample) * 100) if len(sample) > 0 else 0
 
     log(f"\n{'='*80}")
     log("FINAL RESULTS")
     log(f"{'='*80}")
-    log(f"Total questions: {SAMPLE_SIZE}")
-    log(f"Successful insertions: {successful_insertions}/{SAMPLE_SIZE}")
-    log(f"Successful queries: {successful_queries}/{SAMPLE_SIZE}")
-    log(f"Correct answers: {correct_answers}/{SAMPLE_SIZE}")
-    log(f"Accuracy: {accuracy:.1f}%")
-    log(f"Total time: {total_elapsed/60:.1f} minutes")
-    log(f"Avg time/question: {total_elapsed/SAMPLE_SIZE:.1f}s")
+    log(f"Accuracy: {accuracy:.1f}% ({correct_answers}/{len(sample)})")
+    log(f"Margin of Error: ±{margin_of_error}% at 95% confidence")
+    log(f"Confidence Interval: [{accuracy - margin_of_error:.1f}%, {accuracy + margin_of_error:.1f}%]")
+    log(f"Successful insertions: {successful_insertions}/{len(sample)}")
+    log(f"Successful queries: {successful_queries}/{len(sample)}")
+    log(f"Total time: {format_duration(total_elapsed)}")
+    log(f"Avg time/question: {format_duration(total_elapsed/len(sample))}")
+    log(f"\nMatch Types: {dict(match_types)}")
 
     # Save results
     RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(RESULTS_FILE, 'w') as f:
-        json.dump({
-            'benchmark': 'RAGBench FinQA',
-            'sample_size': SAMPLE_SIZE,
-            'error_margin': '±5%',
-            'confidence_level': '95%',
-            'timestamp': datetime.now().isoformat(),
-            'successful_insertions': successful_insertions,
-            'successful_queries': successful_queries,
-            'correct_answers': correct_answers,
-            'accuracy': accuracy,
-            'total_time_seconds': total_elapsed,
-            'avg_time_per_question': total_elapsed / SAMPLE_SIZE,
-            'results': results
-        }, f, indent=2)
+    final_results = {
+        'benchmark': 'RAGBench FinQA',
+        'dataset_source': 'rungalileo/ragbench',
+        'timestamp': datetime.now().isoformat(),
 
-    log(f"\n✅ Results saved to: {RESULTS_FILE}")
-    log(f"✅ Log file: {LOG_FILE}")
+        # Sample info
+        'sample_size': len(sample),
+        'population_size': population_size,
+        'sampling_method': 'random',
+        'random_seed': 42,
+
+        # Statistical validity
+        'confidence_level': '95%',
+        'margin_of_error': f"±{margin_of_error}%",
+        'confidence_interval': {
+            'lower': round(accuracy - margin_of_error, 1),
+            'upper': round(accuracy + margin_of_error, 1)
+        },
+
+        # Results
+        'accuracy': round(accuracy, 2),
+        'correct_answers': correct_answers,
+        'successful_insertions': successful_insertions,
+        'successful_queries': successful_queries,
+
+        # Match type breakdown
+        'match_types': dict(match_types),
+
+        # Timing
+        'total_time_seconds': round(total_elapsed, 1),
+        'avg_time_per_question': round(total_elapsed / len(sample), 1),
+
+        # Detailed results
+        'detailed_results': results
+    }
+
+    with open(RESULTS_FILE, 'w') as f:
+        json.dump(final_results, f, indent=2)
+
+    log(f"\nResults: {RESULTS_FILE}")
+    log(f"Log: {LOG_FILE}")
+
 
 if __name__ == "__main__":
     try:
         run_benchmark()
     except KeyboardInterrupt:
-        log("\n⚠️  Benchmark interrupted by user")
+        log("\nInterrupted by user")
         sys.exit(1)
     except Exception as e:
-        log(f"\n❌ FATAL ERROR: {str(e)}")
+        log(f"\nFATAL: {str(e)}")
         import traceback
         log(traceback.format_exc())
         sys.exit(1)
